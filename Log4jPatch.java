@@ -28,6 +28,7 @@ import jdk.internal.org.objectweb.asm.Opcodes;
 
 /**
  * This is a utility to patch running JVMs with the recent Log4j vulnerability.
+ * https://github.com/advisories/GHSA-jfh8-c2jp-5v3q/dependabot
  *
  * We only recommend trying this if you cannot restart a critical service with
  * the recommended log4j 2.15.0 or jndi properties patch.
