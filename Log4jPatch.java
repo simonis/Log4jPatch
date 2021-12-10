@@ -28,8 +28,31 @@ import jdk.internal.org.objectweb.asm.Opcodes;
 
 public class Log4jPatch {
 
+  private static int asmVersion() {
+    try {
+      Opcodes.class.getDeclaredField("ASM8");
+      return 8 << 16 | 0 << 8; // Opcodes.ASM8
+    } catch (NoSuchFieldException nsfe) {}
+    try {
+      Opcodes.class.getDeclaredField("ASM7");
+      return 7 << 16 | 0 << 8; // Opcodes.ASM7
+    } catch (NoSuchFieldException nsfe) {}
+    try {
+      Opcodes.class.getDeclaredField("ASM6");
+      return 6 << 16 | 0 << 8; // Opcodes.ASM6
+    } catch (NoSuchFieldException nsfe) {}
+    try {
+      Opcodes.class.getDeclaredField("ASM5");
+      return 5 << 16 | 0 << 8; // Opcodes.ASM5
+    } catch (NoSuchFieldException nsfe) {}
+    System.out.println("Warning: ASM5 doesn't seem to be supported");
+    return Opcodes.ASM4;
+  }
+
   public static void agentmain(String args, Instrumentation inst) {
-    System.out.println("Loading Java Agent.");
+
+    int asm = asmVersion();
+    System.out.println("Loading Java Agent (using ASM" + (asm >> 16) + ").");
 
     ClassFileTransformer transformer = new ClassFileTransformer() {
         public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
@@ -37,7 +60,7 @@ public class Log4jPatch {
           if ("org/apache/logging/log4j/core/lookup/JndiLookup".equals(className)) {
             System.out.println("Transforming " + className + " (" + loader + ")");
             ClassWriter cw = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-            MethodInstrumentorClassVisitor cv = new MethodInstrumentorClassVisitor(cw);
+            MethodInstrumentorClassVisitor cv = new MethodInstrumentorClassVisitor(asm, cw);
             ClassReader cr = new ClassReader(classfileBuffer);
             cr.accept(cv, 0);
             return cw.toByteArray();
@@ -66,16 +89,18 @@ public class Log4jPatch {
   }
 
   static class MethodInstrumentorClassVisitor extends ClassVisitor {
+    private int asm;
 
-    public MethodInstrumentorClassVisitor(ClassVisitor cv) {
-      super(Opcodes.ASM5, cv);
+    public MethodInstrumentorClassVisitor(int asm, ClassVisitor cv) {
+      super(asm, cv);
+      this.asm = asm;
     }
 
     @Override
     public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
       MethodVisitor mv = cv.visitMethod(access, name, desc, signature, exceptions);
       if ("lookup".equals(name)) {
-        mv = new MethodInstrumentorMethodVisitor(mv);
+        mv = new MethodInstrumentorMethodVisitor(asm, mv);
       }
       return mv;
     }
@@ -83,8 +108,8 @@ public class Log4jPatch {
 
   static class MethodInstrumentorMethodVisitor extends MethodVisitor implements Opcodes {
 
-    public MethodInstrumentorMethodVisitor(MethodVisitor mv) {
-      super(Opcodes.ASM5, mv);
+    public MethodInstrumentorMethodVisitor(int asm, MethodVisitor mv) {
+      super(asm, mv);
     }
 
     @Override
