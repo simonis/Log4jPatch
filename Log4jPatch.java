@@ -36,7 +36,7 @@ public class Log4jPatch {
             cr.accept(cv, 0);
             return cw.toByteArray();
           } else {
-            return classfileBuffer;
+            return null;
           }
         }
       };
@@ -54,6 +54,9 @@ public class Log4jPatch {
     }
 
     inst.removeTransformer(transformer);
+    // Re-add the transformer with 'canRetransform' set to false
+    // for class instances which might get loaded in the future.
+    inst.addTransformer(transformer, false);
   }
 
   static class MethodInstrumentorClassVisitor extends ClassVisitor {

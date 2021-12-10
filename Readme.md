@@ -4,6 +4,8 @@ This is a POC of a simple tool which injects a Java agent into a running JVM pro
 
 This has been currently only tested with JDK 8 & 11!
 
+**Disclaimer**: this code is provided in the hope that it will be useful, but without any warranty!
+
 ## Building
 
 JDK 8
