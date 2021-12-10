@@ -39,21 +39,28 @@ import jdk.internal.org.objectweb.asm.Opcodes;
  * This utility creates a JavaAgent to attach to your running JVMs and
  * transforms the org/apache/logging/log4j/core/lookup/JndiLookup class
  *
- * If running on Java 11+ you'll need to add --add-exports to get access to
- * ClassWriter and MonitoredHost
+ * Please see the README with this file for javac configuration
  */
 public class Log4jPatch {
 
-  private static String JNDI_CLASS_TO_PATCH = "org/apache/logging/log4j/core/lookup/JndiLookup";
+  private static String LOG4J_JNDI_CLASS_TO_PATCH = "org/apache/logging/log4j/core/lookup/JndiLookup";
 
-  public static void agentmain(String args, Instrumentation inst) {
+  /**
+   * The main method for the JavaAgent that we use for performing the transform
+   *
+   * @param args - Required parameter but is empty in this case.
+   * @param instrumentation The instrumentation class we'll use to transform the bad class.
+   */
+  public static void agentmain(String args, Instrumentation instrumentation) {
 
     System.out.println("Loading Java Agent.");
 
     ClassFileTransformer transformer = new ClassFileTransformer() {
+
         public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
                                 ProtectionDomain protectionDomain, byte[] classfileBuffer) {
-          if (JNDI_CLASS_TO_PATCH.equals(className)) {
+
+          if (LOG4J_JNDI_CLASS_TO_PATCH.equals(className)) {
             System.out.println("Transforming " + className + " (" + loader + ")");
             ClassWriter classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
             MethodInstrumentorClassVisitor classVisitor = new MethodInstrumentorClassVisitor(classWriter);
@@ -65,47 +72,59 @@ public class Log4jPatch {
           }
         }
       };
-    inst.addTransformer(transformer, true);
+    instrumentation.addTransformer(transformer, true);
 
-    for (Class aClass : inst.getAllLoadedClasses()) {
+    for (Class aClass : instrumentation.getAllLoadedClasses()) {
       if ("org.apache.logging.log4j.core.lookup.JndiLookup".equals(aClass.getName())) {
         System.out.println("Patching " + aClass + " (" + aClass.getClassLoader() + ")");
         try {
-          inst.retransformClasses(aClass);
+          instrumentation.retransformClasses(aClass);
         } catch (UnmodifiableClassException uce) {
-          System.out.println(uce);
+          System.err.println(uce);
         }
       }
     }
 
-    inst.removeTransformer(transformer);
+    instrumentation.removeTransformer(transformer);
+
     // Re-add the transformer with 'canRetransform' set to false
     // for class instances which might get loaded in the future.
-    inst.addTransformer(transformer, false);
+    instrumentation.addTransformer(transformer, false);
   }
 
+  /**
+   * This is the visitor class that actually makes the change
+   */
   static class MethodInstrumentorClassVisitor extends ClassVisitor {
 
-    public MethodInstrumentorClassVisitor(ClassVisitor cv) {
-      super(Opcodes.ASM5, cv);
+    // ASM5 to support Java 8+
+    public MethodInstrumentorClassVisitor(ClassVisitor classVisitor) {
+      super(Opcodes.ASM5, classVisitor);
     }
 
     @Override
     public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
-      MethodVisitor mv = cv.visitMethod(access, name, desc, signature, exceptions);
+      MethodVisitor methodVisitor = cv.visitMethod(access, name, desc, signature, exceptions);
       if ("lookup".equals(name)) {
-        mv = new MethodInstrumentorMethodVisitor(mv);
+        methodVisitor = new MethodInstrumentorMethodVisitor(methodVisitor);
       }
-      return mv;
+      return methodVisitor;
     }
   }
 
+  /**
+   * The Visitor class that eventually applies hte patch via ASM (forces an
+   * empty return in teh lookup() method.
+   */
   static class MethodInstrumentorMethodVisitor extends MethodVisitor implements Opcodes {
 
-    public MethodInstrumentorMethodVisitor(MethodVisitor mv) {
-      super(Opcodes.ASM5, mv);
+    public MethodInstrumentorMethodVisitor(MethodVisitor methodVisitor) {
+      super(Opcodes.ASM5, methodVisitor);
     }
 
+    /**
+     * The patch. It finds the lookup() function and makes it return nothing
+     */
     @Override
     public void visitCode() {
       mv.visitCode();
@@ -141,6 +160,8 @@ public class Log4jPatch {
     if (pid != null) {
       try {
         VirtualMachine vm = VirtualMachine.attach(pid);
+        // The loadAgent call is what runs the patch that we created in the
+        // earlier createAgentJar phase.
         vm.loadAgent(jarFile.getAbsolutePath());
       } catch (Exception e) {
         System.err.println(e);
@@ -152,6 +173,14 @@ public class Log4jPatch {
     }
   }
 
+  /**
+   * This method creates the JAR file and the Agent and effectively puts itself
+   * inside the agent.
+   *
+   * @return The JAR file (which will be run as an agent) with this class's
+   * bytecode embedded in it, ready to be executed
+   * @throws Exception
+   */
   private static File createAgentJar() throws Exception {
     String[] innerClasses = new String[] {"", /* this is for Log4jPatch itself */
             "$1",
@@ -201,13 +230,15 @@ public class Log4jPatch {
   }
 
   /**
-   * Entrypoint into the program.
+   * Entrypoint into Log4JPatch.
    *
    * @param args - Log4jPatch [<pid> [<pid> ..]]"
    * @throws Exception - Note this program can crash fairly easily so make sure
    * you are able to capture stderr
    */
   public static void main(String args[]) throws Exception {
+
+    System.out.println("Starting Log4JPatch Utility.");
 
     String jvmPidsToPatch[];
 
@@ -217,9 +248,10 @@ public class Log4jPatch {
       MonitoredHost host = MonitoredHost.getMonitoredHost((String)null);
       Set<Integer> activeVmPids = host.activeVms();
       jvmPidsToPatch = new String[activeVmPids.size()];
-      int count = 0;
 
+      int count = 0;
       // Convert numeric pids to Strings
+      // because the attach API later on needs a String type for the pid
       for (Integer pid : activeVmPids) {
         MonitoredVm jvm = host.getMonitoredVm(new VmIdentifier(pid.toString()));
         String mainClass = MonitoredVmUtil.mainClass(jvm, true);
