@@ -29,3 +29,16 @@ JDK 11
 ```
 java Log4jPatch <java-pid>
 ```
+
+## Known issues
+
+If you get an error like:
+```
+Exception in thread "main" com.sun.tools.attach.AttachNotSupportedException: The VM does not support the attach mechanism
+	at jdk.attach/sun.tools.attach.HotSpotAttachProvider.testAttachable(HotSpotAttachProvider.java:153)
+	at jdk.attach/sun.tools.attach.AttachProviderImpl.attachVirtualMachine(AttachProviderImpl.java:56)
+	at jdk.attach/com.sun.tools.attach.VirtualMachine.attach(VirtualMachine.java:207)
+	at Log4jPatch.loadInstrumentationAgent(Log4jPatch.java:115)
+	at Log4jPatch.main(Log4jPatch.java:139)
+```
+this means that your JVM is refusing any kind of help because it is running with `-XX:+DisableAttachMechanism`.

@@ -8,11 +8,17 @@ import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.lang.instrument.UnmodifiableClassException;
 import java.security.ProtectionDomain;
+import java.util.Set;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
 import java.util.jar.Manifest;
+
 import com.sun.tools.attach.VirtualMachine;
+import sun.jvmstat.monitor.MonitoredHost;
+import sun.jvmstat.monitor.MonitoredVm;
+import sun.jvmstat.monitor.MonitoredVmUtil;
+import sun.jvmstat.monitor.VmIdentifier;
 
 import jdk.internal.org.objectweb.asm.ClassReader;
 import jdk.internal.org.objectweb.asm.ClassVisitor;
@@ -91,7 +97,7 @@ public class Log4jPatch {
 
   private static String myName = Log4jPatch.class.getName();
 
-  private static void loadInstrumentationAgent(String pid) throws Exception {
+  private static void loadInstrumentationAgent(String[] pids) throws Exception {
     String[] innerClasses = new String[] {"", /* this is for Log4jPatch itself */
                                           "$1",
                                           "$MethodInstrumentorClassVisitor",
@@ -112,10 +118,20 @@ public class Log4jPatch {
       jar.write(buf);
     }
     jar.close();
-    VirtualMachine vm = VirtualMachine.attach(pid);
-    vm.loadAgent(jarFile.getAbsolutePath());
-    System.out.println("Successfully loaded the agent into JVM process " + pid);
-    System.out.println("Look at stdout of JVM process " + pid + " for more information");
+    for (String pid : pids) {
+      if (pid != null) {
+        try {
+          VirtualMachine vm = VirtualMachine.attach(pid);
+          vm.loadAgent(jarFile.getAbsolutePath());
+        } catch (Exception e) {
+          System.out.println(e);
+          System.out.println("\nError: couldn't loaded the agent into JVM process " + pid);
+          continue;
+        }
+        System.out.println("\nSuccessfully loaded the agent into JVM process " + pid);
+        System.out.println("  Look at stdout of JVM process " + pid + " for more information");
+      }
+    }
   }
 
   private static byte[] getBytecodes(String myName) throws Exception {
@@ -129,12 +145,34 @@ public class Log4jPatch {
   }
 
   public static void main(String args[]) throws Exception {
-    String pid;
-    if (args.length == 1) {
-      pid = args[0];
-    } else {
-      System.out.println("usage: Log4jPatch <pid>");
+
+    String pid[];
+    if (args.length == 0) {
+      MonitoredHost host = MonitoredHost.getMonitoredHost((String)null);
+      Set<Integer> pids = host.activeVms();
+      pid = new String[pids.size()];
+      int count = 0;
+      for (Integer p : pids) {
+        MonitoredVm jvm = host.getMonitoredVm(new VmIdentifier(p.toString()));
+        String mainClass = MonitoredVmUtil.mainClass(jvm, true);
+        if (!myName.equals(mainClass)) {
+          System.out.println(p + ": " + mainClass);
+          pid[count++] = p.toString();
+        }
+      }
+      if (count > 0) {
+        System.out.print("\nPatch all JVMs? (y/N) : ");
+        BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
+        String answer = in.readLine();
+        if (!"y".equals(answer)) {
+          return;
+        }
+      }
+    } else if (args.length == 1 && ("-h".equals(args[0]) || "-help".equals(args[0]) || "--help".equals(args[0]))) {
+      System.out.println("usage: Log4jPatch [<pid> [<pid> ..]]");
       return;
+    } else {
+      pid = args;
     }
     loadInstrumentationAgent(pid);
   }
