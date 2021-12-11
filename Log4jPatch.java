@@ -65,7 +65,8 @@ public class Log4jPatch {
      */
     public static void agentmain(String args, Instrumentation instrumentation) {
 
-        System.out.println("Loading the Log4JPatch Java Agent.");
+        int asm = asmVersion();
+        System.out.println("Loading Java Agent (using ASM" + (asm >> 16) + ").");
 
         ClassFileTransformer transformer = new ClassFileTransformer() {
 
@@ -88,7 +89,7 @@ public class Log4jPatch {
                 if (LOG4J_JNDI_CLASS_TO_PATCH.equals(className)) {
                     System.out.println("Transforming " + className + " (" + loader + ")");
                     ClassWriter classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-                    MethodInstrumentorClassVisitor classVisitor = new MethodInstrumentorClassVisitor(classWriter);
+                    MethodInstrumentorClassVisitor classVisitor = new MethodInstrumentorClassVisitor(asm, classWriter);
                     ClassReader classReader = new ClassReader(classfileBuffer);
                     classReader.accept(classVisitor, 0);
                     return classWriter.toByteArray();
@@ -123,29 +124,31 @@ public class Log4jPatch {
      */
     static class MethodInstrumentorClassVisitor extends ClassVisitor {
 
-        // We use ASM5 to support Java 8 and above
-        public MethodInstrumentorClassVisitor(ClassVisitor classVisitor) {
-            super(Opcodes.ASM5, classVisitor);
+        private int asm;
+
+        public MethodInstrumentorClassVisitor(int asm, ClassVisitor cv) {
+            super(asm, cv);
+            this.asm = asm;
         }
 
         @Override
         public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
-            MethodVisitor methodVisitor = cv.visitMethod(access, name, desc, signature, exceptions);
+            MethodVisitor mv = cv.visitMethod(access, name, desc, signature, exceptions);
             if ("lookup".equals(name)) {
-                methodVisitor = new MethodInstrumentorMethodVisitor(methodVisitor);
+                mv = new MethodInstrumentorMethodVisitor(asm, mv);
             }
-            return methodVisitor;
+            return mv;
         }
     }
 
     /**
      * The Visitor class that applies the patch via ASM
-     * It forces an empty return in the vulnerable lookup() method
+     * It forces an empty return for the vulnerable lookup() method
      */
     static class MethodInstrumentorMethodVisitor extends MethodVisitor implements Opcodes {
 
-        public MethodInstrumentorMethodVisitor(MethodVisitor methodVisitor) {
-            super(Opcodes.ASM5, methodVisitor);
+        public MethodInstrumentorMethodVisitor(int asm, MethodVisitor mv) {
+            super(asm, mv);
         }
 
         /**
@@ -336,5 +339,26 @@ public class Log4jPatch {
 
         // Do the live patching
         patchAllJVMs(jvmPidsToPatch);
+    }
+
+    private static int asmVersion() {
+        try {
+            Opcodes.class.getDeclaredField("ASM8");
+            return 8 << 16 | 0 << 8; // Opcodes.ASM8
+        } catch (NoSuchFieldException nsfe) {}
+        try {
+            Opcodes.class.getDeclaredField("ASM7");
+            return 7 << 16 | 0 << 8; // Opcodes.ASM7
+        } catch (NoSuchFieldException nsfe) {}
+        try {
+            Opcodes.class.getDeclaredField("ASM6");
+            return 6 << 16 | 0 << 8; // Opcodes.ASM6
+        } catch (NoSuchFieldException nsfe) {}
+        try {
+            Opcodes.class.getDeclaredField("ASM5");
+            return 5 << 16 | 0 << 8; // Opcodes.ASM5
+        } catch (NoSuchFieldException nsfe) {}
+        System.out.println("Warning: ASM5 doesn't seem to be supported");
+        return Opcodes.ASM4;
     }
 }
