@@ -27,263 +27,311 @@ import jdk.internal.org.objectweb.asm.MethodVisitor;
 import jdk.internal.org.objectweb.asm.Opcodes;
 
 /**
- * This is a utility to patch running JVMs with the recent Log4j vulnerability.
- * https://github.com/advisories/GHSA-jfh8-c2jp-5v3q/dependabot
- *
- * We only recommend trying this if you cannot restart a critical service with
- * the recommended log4j 2.15.0 or jndi properties patch.
- *
- * Please note this utility will only detect JVMs running as the same user as
- * this process.
- *
- * This utility creates a JavaAgent to attach to your running JVMs and
- * transforms the org/apache/logging/log4j/core/lookup/JndiLookup class
- *
- * Please see the README with this file for javac configuration
+ * See https://github.com/advisories/GHSA-jfh8-c2jp-5v3q/dependabot
+ * <p>
+ * WARNING: HERE BE DRAGONS and DANGER WILL ROBINSON!
+ * <p>
+ * This patch should only ever be run if:
+ * <p>
+ * 1. You are unable to upgrade your log4j to 2.15.0 and/or restart your JVM
+ * 2. You are unable to change the system property as per
+ * https://logging.apache.org/log4j/2.x/security.html and/or restart your JVM
+ * 3. You are willing to risk freezing your live running JVM (which would mean
+ * you would have to restart it anyhow.
+ * <p>
+ * This is a class is an all-in-one utility that:
+ * <p>
+ * 1. Turns itself into a Java Agent
+ * 2. Attaches to all viable JVMs (running as the same user)
+ * 3. Uses a ClassWalker visitor to find the vulnerable
+ * org/apache/logging/log4j/core/lookup/JndiLookup method and patches it
+ * using ASM to override the return to return nothing.
+ * <p>
+ * See the README.md file for javac configuration (--add-exports is required)
  */
 public class Log4jPatch {
 
-  private static String LOG4J_JNDI_CLASS_TO_PATCH = "org/apache/logging/log4j/core/lookup/JndiLookup";
+    private static final String ORG_APACHE_LOGGING_LOG_4_J_CORE_LOOKUP_JNDI_LOOKUP = "org.apache.logging.log4j.core.lookup.JndiLookup";
+    private static final String LOG4J_JNDI_CLASS_TO_PATCH = "org/apache/logging/log4j/core/lookup/JndiLookup";
 
-  /**
-   * The main method for the JavaAgent that we use for performing the transform
-   *
-   * @param args - Required parameter but is empty in this case.
-   * @param instrumentation The instrumentation class we'll use to transform the bad class.
-   */
-  public static void agentmain(String args, Instrumentation instrumentation) {
+    /**
+     * The main method for the JavaAgent that we use for performing the transform
+     *
+     * @param args            - Required parameter (but is empty in this case)
+     * @param instrumentation The instrumentation class we'll use to transform.
+     */
+    public static void agentmain(String args, Instrumentation instrumentation) {
 
-    System.out.println("Loading Java Agent.");
+        System.out.println("Loading the Log4JPatch Java Agent.");
 
-    ClassFileTransformer transformer = new ClassFileTransformer() {
+        ClassFileTransformer transformer = new ClassFileTransformer() {
 
-        public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
-                                ProtectionDomain protectionDomain, byte[] classfileBuffer) {
+            /**
+             * When the agent runs this transform function will be fired. It
+             * visits all the classes in the target JVM looking for the
+             * LOG4J_JNDI_CLASS_TO_PATCH class to transform the lookup() method.
+             *
+             * @param loader - Classloader used to start searching
+             * @param className - The class we are looking for
+             * @param classBeingRedefined - Not used
+             * @param protectionDomain - Not used
+             * @param classfileBuffer - Not used
+             * @return The transformed class/method
+             */
+            @Override
+            public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
+                                    ProtectionDomain protectionDomain, byte[] classfileBuffer) {
 
-          if (LOG4J_JNDI_CLASS_TO_PATCH.equals(className)) {
-            System.out.println("Transforming " + className + " (" + loader + ")");
-            ClassWriter classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
-            MethodInstrumentorClassVisitor classVisitor = new MethodInstrumentorClassVisitor(classWriter);
-            ClassReader classReader = new ClassReader(classfileBuffer);
-            classReader.accept(classVisitor, 0);
-            return classWriter.toByteArray();
-          } else {
-            return null;
-          }
+                if (LOG4J_JNDI_CLASS_TO_PATCH.equals(className)) {
+                    System.out.println("Transforming " + className + " (" + loader + ")");
+                    ClassWriter classWriter = new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS);
+                    MethodInstrumentorClassVisitor classVisitor = new MethodInstrumentorClassVisitor(classWriter);
+                    ClassReader classReader = new ClassReader(classfileBuffer);
+                    classReader.accept(classVisitor, 0);
+                    return classWriter.toByteArray();
+                } else {
+                    return null;
+                }
+            }
+        };
+
+        instrumentation.addTransformer(transformer, true);
+
+        for (Class aClass : instrumentation.getAllLoadedClasses()) {
+            if (ORG_APACHE_LOGGING_LOG_4_J_CORE_LOOKUP_JNDI_LOOKUP.equals(aClass.getName())) {
+                System.out.println("Patching " + aClass + " (" + aClass.getClassLoader() + ")");
+                try {
+                    instrumentation.retransformClasses(aClass);
+                } catch (UnmodifiableClassException uce) {
+                    System.err.println("Unable to transform the vulnerable class" + uce);
+                }
+            }
         }
-      };
-    instrumentation.addTransformer(transformer, true);
 
-    for (Class aClass : instrumentation.getAllLoadedClasses()) {
-      if ("org.apache.logging.log4j.core.lookup.JndiLookup".equals(aClass.getName())) {
-        System.out.println("Patching " + aClass + " (" + aClass.getClassLoader() + ")");
-        try {
-          instrumentation.retransformClasses(aClass);
-        } catch (UnmodifiableClassException uce) {
-          System.err.println(uce);
-        }
-      }
-    }
+        instrumentation.removeTransformer(transformer);
 
-    instrumentation.removeTransformer(transformer);
-
-    // Re-add the transformer with 'canRetransform' set to false
-    // for class instances which might get loaded in the future.
-    instrumentation.addTransformer(transformer, false);
-  }
-
-  /**
-   * This is the visitor class that actually makes the change
-   */
-  static class MethodInstrumentorClassVisitor extends ClassVisitor {
-
-    // ASM5 to support Java 8+
-    public MethodInstrumentorClassVisitor(ClassVisitor classVisitor) {
-      super(Opcodes.ASM5, classVisitor);
-    }
-
-    @Override
-    public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
-      MethodVisitor methodVisitor = cv.visitMethod(access, name, desc, signature, exceptions);
-      if ("lookup".equals(name)) {
-        methodVisitor = new MethodInstrumentorMethodVisitor(methodVisitor);
-      }
-      return methodVisitor;
-    }
-  }
-
-  /**
-   * The Visitor class that eventually applies hte patch via ASM (forces an
-   * empty return in teh lookup() method.
-   */
-  static class MethodInstrumentorMethodVisitor extends MethodVisitor implements Opcodes {
-
-    public MethodInstrumentorMethodVisitor(MethodVisitor methodVisitor) {
-      super(Opcodes.ASM5, methodVisitor);
+        // Re-add the transformer with 'canRetransform' set to false
+        // for class instances which might get loaded in the future.
+        instrumentation.addTransformer(transformer, false);
     }
 
     /**
-     * The patch. It finds the lookup() function and makes it return nothing
+     * The visitor that finds the lookup() method that we want to transform
      */
-    @Override
-    public void visitCode() {
-      mv.visitCode();
-      mv.visitLdcInsn("Patched JndiLookup::lookup()");
-      mv.visitInsn(ARETURN);
-    }
-  }
+    static class MethodInstrumentorClassVisitor extends ClassVisitor {
 
-  // Name of this class, used for filtering myself out of the patching process
-  private static String myName = Log4jPatch.class.getName();
-
-  private static void patchAllJVMs(String[] pids) throws Exception {
-
-    File jarFile = null;
-    try {
-      jarFile = createAgentJar();
-
-      for (String pid : pids) {
-        patchJVM(jarFile, pid);
-      }
-    }
-    finally {
-      if (jarFile != null) {
-        boolean deleted = jarFile.delete();
-        if (!deleted) {
-          System.err.println("Failed to delete " + jarFile.getAbsolutePath());
+        // We use ASM5 to support Java 8 and above
+        public MethodInstrumentorClassVisitor(ClassVisitor classVisitor) {
+            super(Opcodes.ASM5, classVisitor);
         }
-      }
-    }
-  }
 
-  private static void patchJVM(File jarFile, String pid) {
-    if (pid != null) {
-      try {
-        VirtualMachine vm = VirtualMachine.attach(pid);
-        // The loadAgent call is what runs the patch that we created in the
-        // earlier createAgentJar phase.
-        vm.loadAgent(jarFile.getAbsolutePath());
-      } catch (Exception e) {
-        System.err.println(e);
-        System.err.println("\nCouldn't load the agent into JVM process " + pid);
-        return;
-      }
-      System.out.println("\nSuccessfully loaded the agent into JVM process " + pid);
-      System.out.println("  Look at stdout of JVM process " + pid + " for more information");
-    }
-  }
-
-  /**
-   * This method creates the JAR file and the Agent and effectively puts itself
-   * inside the agent.
-   *
-   * @return The JAR file (which will be run as an agent) with this class's
-   * bytecode embedded in it, ready to be executed
-   * @throws Exception
-   */
-  private static File createAgentJar() throws Exception {
-    String[] innerClasses = new String[] {"", /* this is for Log4jPatch itself */
-            "$1",
-            "$MethodInstrumentorClassVisitor",
-            "$MethodInstrumentorMethodVisitor"};
-    Manifest manifest = createManifest();
-    File jarFile = File.createTempFile("agent", ".jar");
-    jarFile.deleteOnExit();
-    try (JarOutputStream jar = new JarOutputStream(new FileOutputStream(jarFile), manifest)) {
-      for (String klass : innerClasses) {
-        String className = myName.replace('.', '/') + klass;
-        byte[] buf = getBytecodes(className);
-        jar.putNextEntry(new JarEntry(className + ".class"));
-        jar.write(buf);
-      }
-    }
-    return jarFile;
-  }
-
-  private static Manifest createManifest() {
-    Manifest manifest = new Manifest();
-    manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
-    manifest.getMainAttributes().put(new Attributes.Name("Agent-Class"), myName);
-    manifest.getMainAttributes().put(new Attributes.Name("Can-Redefine-Classes"), "true");
-    manifest.getMainAttributes().put(new Attributes.Name("Can-Retransform-Classes"), "true");
-    return manifest;
-  }
-
-  /*
-   * Get the byte code from this class
-   */
-  private static byte[] getBytecodes(String myName) throws Exception {
-    try (InputStream is = Log4jPatch.class.getResourceAsStream(myName + ".class");
-         ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
-
-      byte[] buf = new byte[4096];
-      int len;
-      if (is != null) {
-        while ((len = is.read(buf)) != -1) {
-          baos.write(buf, 0, len);
+        @Override
+        public MethodVisitor visitMethod(int access, String name, String desc, String signature, String[] exceptions) {
+            MethodVisitor methodVisitor = cv.visitMethod(access, name, desc, signature, exceptions);
+            if ("lookup".equals(name)) {
+                methodVisitor = new MethodInstrumentorMethodVisitor(methodVisitor);
+            }
+            return methodVisitor;
         }
-        return baos.toByteArray();
-      } else {
-        throw new Exception("InputStream was null");
-      }
-    }
-  }
-
-  /**
-   * Entrypoint into Log4JPatch.
-   *
-   * @param args - Log4jPatch [<pid> [<pid> ..]]"
-   * @throws Exception - Note this program can crash fairly easily so make sure
-   * you are able to capture stderr
-   */
-  public static void main(String args[]) throws Exception {
-
-    System.out.println("Starting Log4JPatch Utility.");
-
-    String jvmPidsToPatch[];
-
-    if (args.length == 0) {
-
-      // Typecasting a null seems odd but getMonitoredHost needs you to do this.
-      MonitoredHost host = MonitoredHost.getMonitoredHost((String)null);
-      Set<Integer> activeVmPids = host.activeVms();
-      jvmPidsToPatch = new String[activeVmPids.size()];
-
-      int count = 0;
-      // Convert numeric pids to Strings
-      // because the attach API later on needs a String type for the pid
-      for (Integer pid : activeVmPids) {
-        MonitoredVm jvm = host.getMonitoredVm(new VmIdentifier(pid.toString()));
-        String mainClass = MonitoredVmUtil.mainClass(jvm, true);
-
-        // Filter out myself. Might be better to do this via my own pid
-        if (!myName.equals(mainClass)) {
-          System.out.println(pid + ": " + mainClass);
-          jvmPidsToPatch[count++] = pid.toString();
-        }
-      }
-
-      // If there are any JVMs left that we can attach to to then ask the user
-      // if they want to patch them.
-      // TODO This is a batch operation, we could offer a 1 by 1 option.
-      if (count > 0) {
-        System.out.print("\nPatch all JVMs? (y/N) : ");
-        BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
-        String answer = in.readLine();
-
-        if (!"y".equalsIgnoreCase(answer)) {
-          return;
-        }
-      }
-    } else if (args.length == 1 && ("-h".equals(args[0]) || "-help".equals(args[0]) || "--help".equals(args[0]))) {
-      System.out.println("usage: Log4jPatch [<pid> [<pid> ..]]");
-      return;
-    } else {
-      // TODO sanitise the args
-      jvmPidsToPatch = args;
     }
 
-    // Do the live patching
-    patchAllJVMs(jvmPidsToPatch);
-  }
+    /**
+     * The Visitor class that applies the patch via ASM
+     * It forces an empty return in the vulnerable lookup() method
+     */
+    static class MethodInstrumentorMethodVisitor extends MethodVisitor implements Opcodes {
+
+        public MethodInstrumentorMethodVisitor(MethodVisitor methodVisitor) {
+            super(Opcodes.ASM5, methodVisitor);
+        }
+
+        /**
+         * The patch. It finds the lookup() function and makes it return nothing
+         */
+        @Override
+        public void visitCode() {
+            mv.visitCode();
+            mv.visitLdcInsn("Patched JndiLookup::lookup()");
+            mv.visitInsn(ARETURN);
+        }
+    }
+
+    // Name of this class, used for filtering myself out of the patching process
+    private static String myName = Log4jPatch.class.getName();
+
+    /**
+     * Patch all the JVMs that we find.
+     *
+     * @param pids - List of pids for the target JVMs
+     * @throws Exception
+     */
+    private static void patchAllJVMs(String[] pids) throws Exception {
+
+        File jarFile = null;
+        try {
+            jarFile = createAgentJar();
+
+            for (String pid : pids) {
+                patchJVM(jarFile, pid);
+            }
+        } finally {
+            if (jarFile != null) {
+                boolean deleted = jarFile.delete();
+                if (!deleted) {
+                    System.err.println("Failed to delete " + jarFile.getAbsolutePath());
+                }
+            }
+        }
+    }
+
+    /**
+     * Patch a JVM by connecting to it via ourselves as a Java Agent.
+     * When the agent attaches the payload is delivered (see agentmain method)
+     *
+     * @param jarFile The Java Agent (ourselves)
+     * @param pid The pid of the JVM
+     */
+    private static void patchJVM(File jarFile, String pid) {
+        if (pid != null) {
+            try {
+                VirtualMachine vm = VirtualMachine.attach(pid);
+                // The loadAgent call is what runs the patch that we created in the
+                // earlier createAgentJar phase.
+                vm.loadAgent(jarFile.getAbsolutePath());
+            } catch (Exception e) {
+                System.err.println(e);
+                System.err.println("\nCouldn't load the agent into JVM process " + pid);
+                return;
+            }
+            System.out.println("\nSuccessfully loaded the agent into JVM process " + pid);
+            System.out.println("  Look at stdout of JVM process " + pid + " for more information");
+        }
+    }
+
+    /**
+     * This method creates the JAR file which is an Agent and effectively puts
+     * itself inside the agent.
+     *
+     * @return The JAR file (which is a Java Agent) with this class's bytecode
+     * embedded in it, ready to be executed
+     * @throws Exception
+     */
+    private static File createAgentJar() throws Exception {
+        String[] innerClasses = new String[]{"", /* this is for Log4jPatch itself */
+                "$1",
+                "$MethodInstrumentorClassVisitor",
+                "$MethodInstrumentorMethodVisitor"};
+        Manifest manifest = createManifest();
+        File jarFile = File.createTempFile("agent", ".jar");
+        jarFile.deleteOnExit();
+        try (JarOutputStream jar = new JarOutputStream(new FileOutputStream(jarFile), manifest)) {
+            for (String klass : innerClasses) {
+                String className = myName.replace('.', '/') + klass;
+                byte[] buf = getBytecodes(className);
+                jar.putNextEntry(new JarEntry(className + ".class"));
+                jar.write(buf);
+            }
+        }
+        return jarFile;
+    }
+
+    /**
+     * Create the manifest entry for the JAR file (which is a Java Agent).
+     * JAR files need a manifest ot be executed accurately.
+     *
+     * @return The manifest.
+     */
+    private static Manifest createManifest() {
+        Manifest manifest = new Manifest();
+        manifest.getMainAttributes().put(Attributes.Name.MANIFEST_VERSION, "1.0");
+        manifest.getMainAttributes().put(new Attributes.Name("Agent-Class"), myName);
+        manifest.getMainAttributes().put(new Attributes.Name("Can-Redefine-Classes"), "true");
+        manifest.getMainAttributes().put(new Attributes.Name("Can-Retransform-Classes"), "true");
+        return manifest;
+    }
+
+    /**
+     * Get the bytecodes from ourselves (we're going to stream the byte code
+     * of this class into the JAR). Yes this is a neat hack :-)
+     *
+     * @param myName - The name of the class to get the byte codes from (me!)
+     * @return The bytearray containing the bytecodes of this class.
+     * @throws Exception
+     */
+    private static byte[] getBytecodes(String myName) throws Exception {
+        try (InputStream is = Log4jPatch.class.getResourceAsStream(myName + ".class");
+             ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+
+            byte[] buf = new byte[4096];
+            int len;
+            if (is != null) {
+                while ((len = is.read(buf)) != -1) {
+                    baos.write(buf, 0, len);
+                }
+                return baos.toByteArray();
+            } else {
+                throw new Exception("InputStream was null");
+            }
+        }
+    }
+
+    /**
+     * Entrypoint into this Log4JPatch utility.
+     *
+     * @param args - Log4jPatch [<pid> [<pid> ..]]"
+     * @throws Exception - Note this program can crash fairly easily so make
+     *                     sure you are able to capture stderr
+     */
+    public static void main(String args[]) throws Exception {
+
+        System.out.println("Starting Log4JPatch Utility.");
+
+        String jvmPidsToPatch[];
+
+        if (args.length == 0) {
+
+            // Typecasting a null seems odd but getMonitoredHost needs you to do this.
+            MonitoredHost host = MonitoredHost.getMonitoredHost((String) null);
+            Set<Integer> activeVmPids = host.activeVms();
+            jvmPidsToPatch = new String[activeVmPids.size()];
+
+            int count = 0;
+            // Convert numeric pids to String because the attach API later on
+            // needs a String type for the pid
+            for (Integer pid : activeVmPids) {
+                MonitoredVm jvm = host.getMonitoredVm(new VmIdentifier(pid.toString()));
+                String mainClass = MonitoredVmUtil.mainClass(jvm, true);
+
+                // Filter out myself.
+                // TODO Might be better to do this via my own pid
+                if (!myName.equals(mainClass)) {
+                    System.out.println(pid + ": " + mainClass);
+                    jvmPidsToPatch[count++] = pid.toString();
+                }
+            }
+
+            // If there are any JVMs left that we can attach to to then ask the
+            // user if they want to patch all of them.
+            // TODO This is a batch operation, we could offer a 1 by 1 option.
+            if (count > 0) {
+                System.out.print("\nPatch all JVMs? (y/N) : ");
+                BufferedReader in = new BufferedReader(new InputStreamReader(System.in));
+                String answer = in.readLine();
+
+                if (!"y".equalsIgnoreCase(answer)) {
+                    return;
+                }
+            }
+            // TODO Extracxt this to its on method for SRP
+        } else if (args.length == 1 && ("-h".equals(args[0]) || "-help".equals(args[0]) || "--help".equals(args[0]))) {
+            System.out.println("usage: Log4jPatch [<pid> [<pid> ..]]");
+            return;
+        } else {
+            // TODO sanitise the args
+            jvmPidsToPatch = args;
+        }
+
+        // Do the live patching
+        patchAllJVMs(jvmPidsToPatch);
+    }
 }
