@@ -29,6 +29,9 @@ import jdk.internal.org.objectweb.asm.Opcodes;
 /**
  * See https://github.com/advisories/GHSA-jfh8-c2jp-5v3q/dependabot
  * <p>
+ * Kudos to Volker Simonis for the original patch, he continues to amaze and
+ * delight in the Java industry :-) - https://github.com/simonis/Log4jPatch
+ * <p>
  * WARNING: HERE BE DRAGONS and DANGER WILL ROBINSON!
  * <p>
  * This patch should only ever be run if:
