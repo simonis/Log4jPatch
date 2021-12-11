@@ -341,6 +341,10 @@ public class Log4jPatch {
         patchAllJVMs(jvmPidsToPatch);
     }
 
+    /**
+     * Detect and return the ASM version to use.
+     * @return The ASM version
+     */
     private static int asmVersion() {
         try {
             Opcodes.class.getDeclaredField("ASM8");
