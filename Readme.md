@@ -1,3 +1,9 @@
+# -- This repository has been archived --
+
+Further development of this tool will continue at [corretto/hotpatch-for-apache-log4j2](https://github.com/corretto/hotpatch-for-apache-log4j2).
+
+Thanks for sharing, commenting, trying it out and contributing to this project!
+
 # Log4jPatch
 
 This is a POC of a simple tool which injects a Java agent into a running JVM process. The agent will patch the `lookup()` method of all loaded `org.apache.logging.log4j.core.lookup.JndiLookup` instances to unconditionally return the string "Patched JndiLookup::lookup()". This should fix the [CVE-2021-44228](https://www.randori.com/blog/cve-2021-44228/) remote code execution vulnerability in Log4j without restarting the Java process.
